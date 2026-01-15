@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
+use std::sync::mpsc;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -23,6 +24,12 @@ impl Default for NorayConfig {
 pub struct RegistrationInfo {
     pub oid: String,
     pub pid: String,
+}
+
+#[derive(Debug)]
+pub struct PeerInfo {
+    pub port: u16,
+    pub host: String,
 }
 
 pub fn register_only(config: &NorayConfig) -> Result<(RegistrationInfo, TcpStream), String> {
@@ -137,6 +144,120 @@ pub fn wait_for_connection(mut stream: TcpStream, host: String) -> Result<(u16, 
     }
 
     Err("Timeout waiting for response".to_string())
+}
+
+pub fn accept_additional_connections(stream: TcpStream, host: String, tx: mpsc::Sender<PeerInfo>) {
+    println!("[TCP] Started accepting additional connections...");
+
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .map_err(|e| println!("[TCP] Failed to set timeout: {}", e))
+        .ok();
+
+    let mut reader = BufReader::new(stream);
+
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(n) if n > 0 => {
+                let line = line.trim();
+                println!("[TCP] Received: '{}'", line);
+
+                if line.starts_with("connect-relay") {
+                    let port_str = line.trim_start_matches("connect-relay").trim();
+                    match port_str.parse::<u16>() {
+                        Ok(port) => {
+                            println!("[TCP] New peer connected on port {}", port);
+                            if tx
+                                .send(PeerInfo {
+                                    port,
+                                    host: host.clone(),
+                                })
+                                .is_err()
+                            {
+                                println!("[TCP] Receiver disconnected, stopping");
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            println!("[TCP] Invalid port format: '{}'", port_str);
+                        }
+                    }
+                } else if line.starts_with("ERROR") {
+                    println!("[TCP] Server error: {}", line);
+                }
+            }
+            Ok(_) => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                println!("[TCP] Read error: {}, stopping", e);
+                break;
+            }
+        }
+    }
+}
+
+pub fn wait_for_connections(
+    stream: TcpStream,
+    host: String,
+    num_players: u32,
+) -> Result<Vec<PeerInfo>, String> {
+    println!("[TCP] Waiting for {} players...", num_players);
+
+    stream
+        .set_read_timeout(Some(Duration::from_secs(300)))
+        .map_err(|e| format!("Failed to set timeout: {}", e))?;
+
+    let mut reader = BufReader::new(stream);
+    let mut peers = Vec::new();
+
+    while peers.len() < num_players as usize {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(n) if n > 0 => {
+                let line = line.trim();
+                println!("[TCP] Received: '{}'", line);
+
+                if line.starts_with("connect-relay") {
+                    let port_str = line.trim_start_matches("connect-relay").trim();
+                    match port_str.parse::<u16>() {
+                        Ok(port) => {
+                            let peer = PeerInfo {
+                                port,
+                                host: host.clone(),
+                            };
+                            println!(
+                                "[TCP] Player {} connected on port {}",
+                                peers.len() + 1,
+                                port
+                            );
+                            peers.push(peer);
+                        }
+                        Err(_) => {
+                            println!("[TCP] Invalid port format: '{}'", port_str);
+                        }
+                    }
+                } else if line.starts_with("ERROR") {
+                    return Err(format!("Server error: {}", line));
+                }
+            }
+            Ok(_) => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                return Err(format!("Read error: {}", e));
+            }
+        }
+    }
+
+    Ok(peers)
 }
 
 pub fn connect_to_relay(config: &NorayConfig, host_oid: &str) -> Result<(u16, String), String> {

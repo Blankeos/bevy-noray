@@ -5,10 +5,12 @@ use std::net::UdpSocket;
 use std::thread;
 use std::time::Duration;
 
-const PACKET_SIZE: usize = 21;
+const OID_LENGTH: usize = 32;
+const PACKET_SIZE: usize = 4 + OID_LENGTH + 4 + 4 + 4 + 4 + 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
+    pub oid: String,
     pub frame: u32,
     pub x: f32,
     pub y: f32,
@@ -27,16 +29,16 @@ impl GameStatePacket {
     pub fn log_send(&self) {
         let g = &self.0;
         println!(
-            "[SEND] frame={} pos=({:.1},{:.1}) vel=({:.1},{:.1}) jump={}",
-            g.frame, g.x, g.y, g.vx, g.vy, g.is_jumping as u8
+            "[SEND] oid={} frame={} pos=({:.1},{:.1}) vel=({:.1},{:.1}) jump={}",
+            g.oid, g.frame, g.x, g.y, g.vx, g.vy, g.is_jumping as u8
         );
     }
 
     pub fn log_receive(&self) {
         let g = &self.0;
         println!(
-            "[RECV] frame={} pos=({:.1},{:.1}) vel=({:.1},{:.1}) jump={}",
-            g.frame, g.x, g.y, g.vx, g.vy, g.is_jumping as u8
+            "[RECV] oid={} frame={} pos=({:.1},{:.1}) vel=({:.1},{:.1}) jump={}",
+            g.oid, g.frame, g.x, g.y, g.vx, g.vy, g.is_jumping as u8
         );
     }
 }
@@ -76,11 +78,10 @@ pub fn register_udp_socket(
 pub fn start_udp_relay(
     socket: UdpSocket,
     relay_port: u16,
-    host: String,
 ) -> crossbeam_channel::Receiver<GameState> {
     println!(
-        "UDP relay listening for incoming packets from {}:{}",
-        host, relay_port
+        "UDP relay listening for incoming packets on port {}",
+        relay_port
     );
 
     let (tx, rx) = crossbeam_channel::bounded::<GameState>(100);
@@ -93,13 +94,8 @@ pub fn start_udp_relay(
 
         loop {
             match socket.recv_from(&mut buf) {
-                Ok((len, addr)) => {
-                    if len == PACKET_SIZE
-                        && addr
-                            .ip()
-                            .to_string()
-                            .contains(&host.split(':').next().unwrap_or_default())
-                    {
+                Ok((len, _addr)) => {
+                    if len == PACKET_SIZE {
                         match deserialize::<GameState>(&buf[..len]) {
                             Ok(state) => {
                                 let packet = GameStatePacket(state.clone());
@@ -111,7 +107,7 @@ pub fn start_udp_relay(
                                 }
                             }
                             Err(e) => {
-                                println!("Failed to deserialize packet from {}: {}", addr, e);
+                                println!("Failed to deserialize packet: {}", e);
                             }
                         }
                     }
